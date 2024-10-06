@@ -1,27 +1,14 @@
-import argparse
-import numpy as np
-from tqdm import tqdm
-from pebble import ProcessPool
-from concurrent.futures import TimeoutError
-
 from grader import *
-
 from parser import *
-from utils import load_jsonl
-from python_executor import PythonExecutor
 
 import torch
 from transformers import AutoModel, AutoTokenizer
-from einops import rearrange
 from tqdm import tqdm
-import os
+import jax
+from einops import rearrange
 
 
-
-def get_best_of_n(samples, batch_size=1, model_name="Qwen/Qwen2.5-Math-RM-72B", device_map="auto"):
-    if batch_size > 1:
-        raise NotImplementedError("batch_size > 1 is not supported")
-    
+def get_best_of_n_qwen(samples, batch_size=1, model_name="Qwen/Qwen2.5-Math-RM-72B", device_map="auto"):    
     len_lists = [(k, len(v)) for k, v in samples[0].items() if isinstance(v, list)]
     N = len_lists[0][1]
     model = AutoModel.from_pretrained(
@@ -44,31 +31,52 @@ def get_best_of_n(samples, batch_size=1, model_name="Qwen/Qwen2.5-Math-RM-72B", 
                 new_sample[k] = v
         return new_sample
 
-    def process(sample):
-        if not isinstance(sample["code"], list):
-            return sample
+    def process(batch):
+        if not isinstance(batch[0]["code"], list):
+            raise ValueError("batch[0]['code'] is not a list")
 
-        pqa = [f"\nQuestion: {sample['question']}\nAnswer: {a}" for a in sample['code']]
-        pqa_ids = [tokenizer.encode(p, add_special_tokens=False, return_tensors='pt') for p in pqa]
-        max_len = max([p.shape[1] for p in pqa_ids])
-        pqa_ids = [torch.cat([p, torch.full((1, max_len-p.shape[1]), pad_token_id, dtype=torch.long)], dim=1) for p in pqa_ids]
-        pqa_ids = torch.cat(pqa_ids, dim=0)
+        # This creates a 2D list of strings (question-answer pairs)
+        pqa = [[f"\nQuestion: {sample['question']}\nAnswer: {a}" for a in sample['code']] for sample in batch]
+        
+        # This creates a 2D list of tensors (Batch, N), where the tensors have shape (1, seq_len)
+        pqa_ids = [[tokenizer.encode(p, add_special_tokens=False, return_tensors='pt') for p in pqa_list] for pqa_list in pqa]
+        
+        # Find the maximum length across all encoded sequences
+        max_len = max(max(p.shape[1] for p in pqa_list) for pqa_list in pqa_ids)
+        
+        padded_ids = jax.tree.map(lambda x: torch.cat([x, torch.full((1, max_len-x.shape[1]), pad_token_id, dtype=torch.long)], dim=1), pqa_ids)
+
+        # Stack batch and N dimensions
+        padded_ids = torch.stack([torch.stack(sample) for sample in padded_ids])
+        B = padded_ids.shape[0]
+        padded_ids = rearrange(padded_ids, "batch n 1 seq_len -> (batch n) seq_len")
+
         with torch.no_grad():
-            outputs = model(input_ids=pqa_ids) # N 1
+            outputs = model(input_ids=padded_ids) # (B N) 1
         logits = outputs["logits"].clone()
         del outputs
-        best_of_n = torch.argmax(logits, dim=0).item()
-        sample = filter(sample, best_of_n)
-        return sample
+        logits = rearrange(logits, "(batch n) 1 -> batch n", batch=B, n=N)
+        best_of_n = torch.argmax(logits, dim=1) # B
+        batch = [filter(sample, n) for sample, n in zip(batch, best_of_n)]
+        return batch
        
     new_samples = []
-    for sample in tqdm(samples, desc="Processing samples"):
-        new_sample = process(sample)
-        new_samples.append(new_sample)
+    for i in tqdm(range(0, len(samples), batch_size), desc="Processing samples"):
+        batch = samples[i:i+batch_size]
+        new_batch = process(batch)
+        new_samples.extend(new_batch)
 
     assert len(new_samples) == len(samples)
     assert new_samples[0].keys() == samples[0].keys()
     assert len(new_samples[0]["code"]) == 1
 
     return new_samples
+
+def get_best_of_n_mistral(samples, batch_size=1, model_name="peiyi9979/math-shepherd-mistral-7b-prm", device_map="auto"):
+    pass
+
+rm_dict = {
+    "Qwen/Qwen2.5-Math-RM-72B" : get_best_of_n_qwen,
+    "peiyi9979/math-shepherd-mistral-7b-prm" : get_best_of_n_mistral,
+}
 

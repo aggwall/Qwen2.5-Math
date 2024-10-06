@@ -5,7 +5,7 @@ MODEL_NAME_OR_PATH=Qwen/Qwen2.5-Math-1.5B
 OUTPUT_DIR=${MODEL_NAME_OR_PATH}/math_eval
 
 SPLIT="test"
-NUM_TEST_SAMPLE=-1
+NUM_TEST_SAMPLE=8
 
 # English open datasets
 # DATA_NAME="gsm8k,math,svamp,asdiv,mawps,carp_en,tabmwp,minerva_math,gaokao2023en,olympiadbench,college_math"
@@ -29,7 +29,8 @@ python3 -u math_eval.py \
     --use_vllm \
     --save_outputs \
     --overwrite \
-    --num_shots 4
+    --num_shots 4 \
+    --rm_batch_size 4
 
 DATA_NAME="math"
 TOKENIZERS_PARALLELISM=false \

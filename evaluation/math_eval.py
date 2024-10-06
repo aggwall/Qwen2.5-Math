@@ -16,7 +16,7 @@ from trajectory import *
 from data_loader import load_data
 from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
-from rm import get_best_of_n
+from rm import rm_dict
 
 from vllm.distributed.parallel_state import destroy_model_parallel
 import os
@@ -386,7 +386,7 @@ def main(args):
     results = [
         run_execute(executor, code, args.prompt_type, data_name) for code in codes
     ]
-    time_use = time.time() - start_time
+    inference_use = time.time() - start_time
 
     # put results back to examples
     all_samples = []
@@ -425,11 +425,13 @@ def main(args):
     torch.cuda.empty_cache()
     torch.cuda.memory._dump_snapshot("before_rm.pkl")
 
+    get_best_of_n = rm_dict[args.rm_model_name]
     best_of_n_samples = get_best_of_n(all_samples, 
                                  batch_size=args.rm_batch_size,
                                  model_name=args.rm_model_name,
                                  device_map="auto")
     
+    rm_use = time.time() - inference_use
 
     all_samples, result_json = evaluate(
         samples=best_of_n_samples,
@@ -442,10 +444,10 @@ def main(args):
     if len(processed_samples) < len(all_samples) and args.save_outputs:
         save_jsonl(all_samples, out_file)
 
-    result_json["time_use_in_second"] = time_use
-    result_json["time_use_in_minite"] = (
-        f"{int(time_use // 60)}:{int(time_use % 60):02d}"
-    )
+    result_json["inference_use"] = inference_use
+    result_json["rm_use"] = rm_use
+    result_json["inference_use_minutes"] = inference_use / 60
+    result_json["rm_use_minutes"] = rm_use / 60
 
     with open(
         out_file.replace(".jsonl", f"_{args.prompt_type}_ns-{args.n_sampling}_metrics.json"), "w"
