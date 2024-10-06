@@ -14,6 +14,7 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 from einops import rearrange
 from tqdm import tqdm
+import os
 
 
 
@@ -23,13 +24,13 @@ def get_best_of_n(samples, batch_size=1, model_name="Qwen/Qwen2.5-Math-RM-72B", 
     
     len_lists = [(k, len(v)) for k, v in samples[0].items() if isinstance(v, list)]
     N = len_lists[0][1]
-    import pdb; pdb.set_trace()
     model = AutoModel.from_pretrained(
         model_name, 
         device_map=device_map,
         torch_dtype=torch.bfloat16,
         trust_remote_code=True,
     ).eval()
+
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     pad_token_id = tokenizer.pad_token_id
@@ -44,17 +45,19 @@ def get_best_of_n(samples, batch_size=1, model_name="Qwen/Qwen2.5-Math-RM-72B", 
         return new_sample
 
     def process(sample):
-        pqa = [f"\nQuestion: {sample['question']}\nAnswer: {a}" for a in sample['solution']]
+        if not isinstance(sample["code"], list):
+            return sample
+
+        pqa = [f"\nQuestion: {sample['question']}\nAnswer: {a}" for a in sample['code']]
         pqa_ids = [tokenizer.encode(p, add_special_tokens=False, return_tensors='pt') for p in pqa]
         max_len = max([p.shape[1] for p in pqa_ids])
         pqa_ids = [torch.cat([p, torch.full((1, max_len-p.shape[1]), pad_token_id, dtype=torch.long)], dim=1) for p in pqa_ids]
         pqa_ids = torch.cat(pqa_ids, dim=0)
-
-        outputs = model(input_ids=pqa_ids) # N 1
+        with torch.no_grad():
+            outputs = model(input_ids=pqa_ids) # N 1
         logits = outputs["logits"].clone()
         del outputs
         best_of_n = torch.argmax(logits, dim=0).item()
-
         sample = filter(sample, best_of_n)
         return sample
        
@@ -65,6 +68,7 @@ def get_best_of_n(samples, batch_size=1, model_name="Qwen/Qwen2.5-Math-RM-72B", 
 
     assert len(new_samples) == len(samples)
     assert new_samples[0].keys() == samples[0].keys()
+    assert len(new_samples[0]["code"]) == 1
 
     return new_samples
 

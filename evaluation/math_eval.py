@@ -18,8 +18,9 @@ from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
 from rm import get_best_of_n
 
+from vllm.distributed.parallel_state import destroy_model_parallel
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,5"
+import gc
 
 
 def parse_args():
@@ -121,7 +122,7 @@ def setup(args):
     if args.use_vllm:
         llm = LLM(
             model=args.model_name_or_path,
-            tensor_parallel_size= 4, #8 // args.pipeline_parallel_size,
+            tensor_parallel_size=1, #8 // args.pipeline_parallel_size,
             pipeline_parallel_size= 1, #args.pipeline_parallel_size,
             trust_remote_code=True,
         )
@@ -168,7 +169,31 @@ def is_multi_choice(answer):
     return True
 
 
-def main(llm, tokenizer, data_name, args):
+def main(args):
+    data_name = args.data_names.split(",")[0]
+
+    torch.cuda.memory._record_memory_history()
+    torch.cuda.memory._dump_snapshot("initial.pkl")
+    # load model
+    if args.use_vllm:
+        llm = LLM(
+            model=args.model_name_or_path,
+            tensor_parallel_size=1, #8 // args.pipeline_parallel_size,
+            pipeline_parallel_size= 1, #args.pipeline_parallel_size,
+            trust_remote_code=True,
+        )
+        tokenizer = None
+        if args.apply_chat_template:
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.model_name_or_path, trust_remote_code=True
+            )
+    else:
+        llm, tokenizer = load_hf_lm_and_tokenizer(
+            model_name_or_path=args.model_name_or_path,
+            load_in_half=True,
+            use_fast_tokenizer=True,
+            use_safetensors=args.use_safetensors,
+        )
 
     examples, processed_samples, out_file = prepare_data(data_name, args)
     print("=" * 50)
@@ -393,12 +418,18 @@ def main(llm, tokenizer, data_name, args):
     all_samples.extend(processed_samples)
 
     # reward model
+    destroy_model_parallel()
+    del llm.llm_engine.model_executor.driver_worker
+    del llm # Isn't necessary for releasing memory, but why not
+    gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.memory._dump_snapshot("before_rm.pkl")
-    import pdb; pdb.set_trace()
+
     best_of_n_samples = get_best_of_n(all_samples, 
                                  batch_size=args.rm_batch_size,
-                                 model_name=args.rm_model_name)
+                                 model_name=args.rm_model_name,
+                                 device_map="auto")
+    
 
     all_samples, result_json = evaluate(
         samples=best_of_n_samples,
@@ -417,7 +448,7 @@ def main(llm, tokenizer, data_name, args):
     )
 
     with open(
-        out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json"), "w"
+        out_file.replace(".jsonl", f"_{args.prompt_type}_ns-{args.n_sampling}_metrics.json"), "w"
     ) as f:
         json.dump(result_json, f, indent=4)
     return result_json
@@ -426,4 +457,4 @@ def main(llm, tokenizer, data_name, args):
 if __name__ == "__main__":
     args = parse_args()
     set_seed(args.seed)
-    setup(args)
+    main(args)
