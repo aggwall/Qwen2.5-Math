@@ -16,6 +16,10 @@ from trajectory import *
 from data_loader import load_data
 from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
+from rm import get_best_of_n
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3,4,5"
 
 
 def parse_args():
@@ -51,6 +55,11 @@ def parse_args():
         action="store_true",
         help="Few shot for multiple-choice questions, zero shot for others.",
     )
+
+    # reward model args
+    parser.add_argument("--rm_batch_size", type=int, default=1)
+    parser.add_argument("--rm_model_name", type=str, default="Qwen/Qwen2.5-Math-RM-72B")
+
     args = parser.parse_args()
     args.top_p = (
         1 if args.temperature == 0 else args.top_p
@@ -106,13 +115,14 @@ def prepare_data(data_name, args):
 
 
 def setup(args):
+    torch.cuda.memory._record_memory_history()
+    torch.cuda.memory._dump_snapshot("initia.pkl")
     # load model
-    available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     if args.use_vllm:
         llm = LLM(
             model=args.model_name_or_path,
-            tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
-            pipeline_parallel_size=args.pipeline_parallel_size,
+            tensor_parallel_size= 4, #8 // args.pipeline_parallel_size,
+            pipeline_parallel_size= 1, #args.pipeline_parallel_size,
             trust_remote_code=True,
         )
         tokenizer = None
@@ -128,11 +138,14 @@ def setup(args):
             use_safetensors=args.use_safetensors,
         )
 
+    torch.cuda.memory._dump_snapshot("after_load_model.pkl")
+
     # infer & eval
     data_list = args.data_names.split(",")
     results = []
-    for data_name in data_list:
+    for i, data_name in enumerate(data_list):
         results.append(main(llm, tokenizer, data_name, args))
+        torch.cuda.memory._dump_snapshot(f"after_data_{data_name}.pkl")
 
     # add "avg" result to data_list and results
     data_list.append("avg")
@@ -156,6 +169,7 @@ def is_multi_choice(answer):
 
 
 def main(llm, tokenizer, data_name, args):
+
     examples, processed_samples, out_file = prepare_data(data_name, args)
     print("=" * 50)
     print("data:", data_name, " ,remain samples:", len(examples))
@@ -291,6 +305,7 @@ def main(llm, tokenizer, data_name, args):
         assert len(outputs) == len(current_prompts)
 
         # process all outputs
+        torch.cuda.memory._dump_snapshot("before_process.pkl")
         remain_prompts = []
         remain_codes = []
         for (i, query), output in zip(current_prompts, outputs):
@@ -370,14 +385,23 @@ def main(llm, tokenizer, data_name, args):
                     [c for c in preds[j] if c in ["A", "B", "C", "D", "E"]]
                 )
 
-        sample.pop("prompt")
+        # sample.pop("prompt")
         sample.update({"code": code, "pred": preds, "report": reports})
         all_samples.append(sample)
 
     # add processed samples
     all_samples.extend(processed_samples)
+
+    # reward model
+    torch.cuda.empty_cache()
+    torch.cuda.memory._dump_snapshot("before_rm.pkl")
+    import pdb; pdb.set_trace()
+    best_of_n_samples = get_best_of_n(all_samples, 
+                                 batch_size=args.rm_batch_size,
+                                 model_name=args.rm_model_name)
+
     all_samples, result_json = evaluate(
-        samples=all_samples,
+        samples=best_of_n_samples,
         data_name=data_name,
         prompt_type=args.prompt_type,
         execute=True,

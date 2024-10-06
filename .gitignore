@@ -1,0 +1,4 @@
+evaluation/__pycache__/
+evaluation/*.pkl
+
+evaluation/outputs/
