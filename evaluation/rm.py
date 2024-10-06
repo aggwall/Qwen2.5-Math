@@ -51,7 +51,9 @@ def get_best_of_n(samples, batch_size=1, model_name="Qwen/Qwen2.5-Math-RM-72B", 
         pqa_ids = torch.cat(pqa_ids, dim=0)
 
         outputs = model(input_ids=pqa_ids) # N 1
-        best_of_n = torch.argmax(outputs.logits, dim=0).item()
+        logits = outputs["logits"].clone()
+        del outputs
+        best_of_n = torch.argmax(logits, dim=0).item()
 
         sample = filter(sample, best_of_n)
         return sample
